@@ -17,10 +17,23 @@ namespace sudoku::detail {
 // Bit 0 is never used. All masks are unsigned.
 constexpr unsigned kAllDigits = ((1u << (kMaxDigit + 1)) - 1u) & ~1u;  // 0x3FE
 
-inline int box_of(int index) {
-  return (index / kBoardSize / kBoxSize) * kBoxSize +
-         (index % kBoardSize) / kBoxSize;
+// Row, column and box index of every cell, computed once at compile time (the
+// search touches them in its innermost loop).
+struct CellUnits {
+  unsigned char row[kCellCount];
+  unsigned char column[kCellCount];
+  unsigned char box[kCellCount];
+};
+constexpr CellUnits make_cell_units() {
+  CellUnits t{};
+  for (int i = 0; i < kCellCount; ++i) {
+    t.row[i] = static_cast<unsigned char>(i / kBoardSize);
+    t.column[i] = static_cast<unsigned char>(i % kBoardSize);
+    t.box[i] = static_cast<unsigned char>((i / kBoardSize / kBoxSize) * kBoxSize + (i % kBoardSize) / kBoxSize);
+  }
+  return t;
 }
+inline constexpr CellUnits kCellUnits = make_cell_units();
 
 // Fisher-Yates driven directly by the engine's raw output (specified by the
 // standard) rather than std::shuffle / uniform_int_distribution, whose
@@ -44,7 +57,11 @@ class Search {
     for (int i = 0; i < kCellCount; ++i) {
       const int d = puzzle.get(i);
       grid_[i] = d;
-      if (d != kEmptyCell) place_masks(i, d);
+      if (d != kEmptyCell) {
+        place_masks(i, d);
+      } else {
+        empties_[empty_count_++] = static_cast<unsigned char>(i);  // ascending: ties keep going to the lowest index
+      }
     }
   }
 
@@ -68,19 +85,19 @@ class Search {
 
   void place_masks(int i, int d) {
     const unsigned bit = 1u << d;
-    rows_[i / kBoardSize] |= bit;
-    cols_[i % kBoardSize] |= bit;
-    boxes_[box_of(i)] |= bit;
+    rows_[kCellUnits.row[i]] |= bit;
+    cols_[kCellUnits.column[i]] |= bit;
+    boxes_[kCellUnits.box[i]] |= bit;
   }
   void clear_masks(int i, int d) {
     const unsigned bit = 1u << d;
-    rows_[i / kBoardSize] &= ~bit;
-    cols_[i % kBoardSize] &= ~bit;
-    boxes_[box_of(i)] &= ~bit;
+    rows_[kCellUnits.row[i]] &= ~bit;
+    cols_[kCellUnits.column[i]] &= ~bit;
+    boxes_[kCellUnits.box[i]] &= ~bit;
   }
   unsigned candidates(int i) const {
     return kAllDigits &
-           ~(rows_[i / kBoardSize] | cols_[i % kBoardSize] | boxes_[box_of(i)]);
+           ~(rows_[kCellUnits.row[i]] | cols_[kCellUnits.column[i]] | boxes_[kCellUnits.box[i]]);
   }
 
   void descend(CountResult& out) {
@@ -94,8 +111,9 @@ class Search {
     int best = -1;
     unsigned best_mask = 0;
     int best_count = kBoardSize + 1;
-    for (int i = 0; i < kCellCount; ++i) {
-      if (grid_[i] != kEmptyCell) continue;
+    for (int k = 0; k < empty_count_; ++k) {  // the cells that were empty at the start, in ascending order
+      const int i = empties_[k];
+      if (grid_[i] != kEmptyCell) continue;   // filled on the current path
       const unsigned mask = candidates(i);
       const int n = std::popcount(mask);
       if (n < best_count) {
@@ -144,6 +162,8 @@ class Search {
   }
 
   int grid_[kCellCount] = {};
+  unsigned char empties_[kCellCount] = {};
+  int empty_count_ = 0;
   unsigned rows_[kBoardSize] = {};
   unsigned cols_[kBoardSize] = {};
   unsigned boxes_[kBoardSize] = {};

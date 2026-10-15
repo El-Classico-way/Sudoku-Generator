@@ -7,6 +7,7 @@ name = "sudoku-studio"
 version = "0.1.0"
 description = "Sudoku puzzle generator: Python orchestration and rendering layer"
 requires-python = ">=3.11"
+license = {text = "MIT"}
 dependencies = []
 
 [project.optional-dependencies]

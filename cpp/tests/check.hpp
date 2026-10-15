@@ -7,6 +7,9 @@
 #include <string>
 
 namespace testing_detail {
+// Only the first kMaxPrinted failures are printed so a badly broken build
+// fails quickly instead of flooding the terminal; all are still counted.
+inline constexpr int kMaxPrinted = 20;
 inline int& failures() {
   static int count = 0;
   return count;
@@ -16,8 +19,9 @@ inline int& failures() {
 #define CHECK(cond)                                                       \
   do {                                                                    \
     if (!(cond)) {                                                        \
-      std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__,         \
-                   __LINE__, #cond);                                      \
+      if (testing_detail::failures() < testing_detail::kMaxPrinted)       \
+        std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__,       \
+                     __LINE__, #cond);                                    \
       ++testing_detail::failures();                                       \
     }                                                                     \
   } while (false)
@@ -27,8 +31,9 @@ inline int& failures() {
 #define CHECK_CTX(cond, ctx)                                              \
   do {                                                                    \
     if (!(cond)) {                                                        \
-      std::fprintf(stderr, "%s:%d: CHECK failed: %s [%s]\n", __FILE__,    \
-                   __LINE__, #cond, std::string(ctx).c_str());            \
+      if (testing_detail::failures() < testing_detail::kMaxPrinted)       \
+        std::fprintf(stderr, "%s:%d: CHECK failed: %s [%s]\n", __FILE__,  \
+                     __LINE__, #cond, std::string(ctx).c_str());          \
       ++testing_detail::failures();                                       \
     }                                                                     \
   } while (false)
