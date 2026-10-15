@@ -1,0 +1,43 @@
+# Build output
+/build/
+/out/
+cmake-build-*/
+CMakeUserPresets.json
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Generated outputs (tracked sample assets belong in examples/ and are
+# un-ignored explicitly)
+/output/
+benchmarks/results/
+*.svg
+*.pdf
+*.png
+!examples/**/*.svg
+!examples/**/*.pdf
+!examples/**/*.png
+!docs/**/*.svg
+!docs/**/*.png
