@@ -295,11 +295,12 @@ def test_uniqueness_is_never_assumed(engine):
 # ----------------------------------------------------------- documentation
 
 def test_readme_python_examples_run(engine_executable, monkeypatch, capsys):
-    """Every ```python run block in the README executes without error against the real engine."""
+    """Every ```python run block in the README and docs/REFERENCE.md executes without error against the real engine."""
     import re
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "README.md").read_text() + "\n" + (root / "docs" / "REFERENCE.md").read_text()
     blocks = re.findall(r"```python run\n(.*?)\n```", text, re.S)
     assert len(blocks) >= 2, "the README examples were not found"
     monkeypatch.setenv("SUDOKU_CLI", str(engine_executable))      # the examples use default discovery

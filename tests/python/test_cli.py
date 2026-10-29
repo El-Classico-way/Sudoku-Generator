@@ -27,6 +27,7 @@ NS = "{http://www.w3.org/2000/svg}"
 def real(engine_executable, monkeypatch, tmp_path):
     """Run the CLI in-process against the real engine from an empty scratch directory."""
     monkeypatch.setenv("SUDOKU_CLI", str(engine_executable))
+    monkeypatch.delenv(cli.OUTPUT_DIR_ENV, raising=False)       # bare output names: current directory
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -270,13 +271,45 @@ def test_run_sh_is_executable_and_shows_help_from_any_directory(tmp_path):
         assert done.returncode == 0 and "usage:" in done.stdout and "generate" in done.stdout
 
 
-def test_run_sh_runs_commands_from_another_directory_and_keeps_relative_paths(engine_executable, tmp_path):
+def test_run_sh_runs_commands_from_another_directory_and_places_output_files(engine_executable, tmp_path):
     if Path(engine_executable).resolve() != (ROOT / "build/dev/sudoku_cli").resolve():
         pytest.skip("run.sh uses build/dev/sudoku_cli")
     done = launcher(["solve", "--board", PUZZLE], tmp_path)
     assert done.returncode == 0 and "solved (search)" in done.stdout
-    done = launcher(["generate", "--difficulty", "easy", "--seed", "7", "--output", "p.svg"], tmp_path)
-    assert done.returncode == 0 and (tmp_path / "p.svg").is_file() and not (ROOT / "p.svg").exists()
+    product = tmp_path / "product"                                 # stands in for the repository's product/
+    done = launcher(["generate", "--difficulty", "easy", "--seed", "7", "--output", "p.svg"], tmp_path,
+                    SUDOKU_OUTPUT_DIR=str(product))
+    assert done.returncode == 0 and (product / "p.svg").is_file() and not (tmp_path / "p.svg").exists()
+    (tmp_path / "sub").mkdir()
+    done = launcher(["generate", "--seed", "7", "--output", "./q.svg", "--solution-output", "sub/s.svg"], tmp_path,
+                    SUDOKU_OUTPUT_DIR=str(product))
+    assert done.returncode == 0 and (tmp_path / "q.svg").is_file() and (tmp_path / "sub" / "s.svg").is_file()
+    assert sorted(p.name for p in product.iterdir()) == ["p.svg"] and not (ROOT / "p.svg").exists()
+
+
+def test_run_sh_defaults_bare_output_names_to_product():
+    text = RUN_SH.read_text()
+    assert 'export SUDOKU_OUTPUT_DIR="${SUDOKU_OUTPUT_DIR:-$ROOT/product}"' in text
+
+
+def test_bare_output_names_go_to_the_output_directory(real, capsys, monkeypatch):
+    out = real / "deep" / "product"                                # created on demand, parents included
+    monkeypatch.setenv(cli.OUTPUT_DIR_ENV, str(out))
+    code, stdout, err = run(capsys, "generate", "--seed", "7", "--output", "p.svg", "--solution-output", "s.svg")
+    assert code == 0, err
+    assert sorted(p.name for p in out.iterdir()) == ["p.svg", "s.svg"] and f"wrote puzzle image: {out / 'p.svg'}" in stdout
+    code, _, err = run(capsys, "generate", "--seed", "7", "--output", "p.svg")
+    assert code == 2 and "already exists" in err                   # the existing-file rule applies there too
+    monkeypatch.delenv(cli.OUTPUT_DIR_ENV)
+    code, _, err = run(capsys, "generate", "--seed", "7", "--output", "p.svg")
+    assert code == 0 and (real / "p.svg").is_file()                # without the variable: current directory
+
+
+def test_an_unusable_output_directory_is_a_usage_error(real, capsys, monkeypatch):
+    (real / "file").write_text("x")
+    monkeypatch.setenv(cli.OUTPUT_DIR_ENV, str(real / "file" / "product"))
+    code, _, err = run(capsys, "generate", "--seed", "7", "--output", "p.svg")
+    assert code == 2 and "cannot create the output directory" in err
 
 
 def test_run_sh_propagates_exit_codes(engine_executable, tmp_path):

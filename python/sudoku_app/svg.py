@@ -24,10 +24,24 @@ does not rely on colour alone (weight and slant differ too).
 
 Colours come from a :class:`Theme` (built-ins ``default``/``light``/``dark``); the
 default reproduces the M19 output byte for byte.
+
+Picture themes
+--------------
+A theme may carry a :class:`Picture` (PNG, JPEG or SVG bytes). It is drawn over the whole
+image, scaled to cover it, under a *veil*: a rectangle in the theme's background colour with
+opacity ``veil``. The picture is embedded as a ``data:`` URI in an ``<image>`` element, so the
+document stays self-contained, and viewers display an SVG picture in that position as a static
+image (no scripts, no external loads). Geometry and digits are unchanged.
+
+Readability is guaranteed, not hoped for: the colour under any line or digit is
+``veil * background + (1 - veil) * pixel`` per sRGB channel, which lies between the values for a
+black and a white pixel. A picture theme is accepted only if every digit colour reaches 4.5:1 and
+every line colour 3:1 against *both* extremes, so the ratios hold for any picture.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from dataclasses import dataclass
@@ -39,7 +53,7 @@ from .protocol import BOARD_LENGTH, check_board
 
 __all__ = [
     "DEFAULT_CELL_SIZE", "DEFAULT_MARGIN", "MIN_CELL_SIZE", "MAX_CELL_SIZE", "MIN_MARGIN", "MAX_MARGIN",
-    "Theme", "LIGHT_THEME", "DARK_THEME", "DEFAULT_THEME", "THEMES", "THEME_NAMES", "get_theme",
+    "Theme", "Picture", "PICTURE_FOCUS", "MAX_PICTURE_BYTES", "DEFAULT_VEIL", "worst_case_contrast", "LIGHT_THEME", "DARK_THEME", "DEFAULT_THEME", "THEMES", "THEME_NAMES", "get_theme",
     "render_board_svg", "write_board_svg",
 ]
 
@@ -53,6 +67,88 @@ MIN_MARGIN, MAX_MARGIN = 4, 100  # the minimum keeps the outer border fully insi
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 _THEME_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
+MAX_PICTURE_BYTES = 10 * 1024 * 1024
+DEFAULT_VEIL = 0.72
+# focus -> preserveAspectRatio: which part of a picture stays visible when it is cropped to a square
+PICTURE_FOCUS = MappingProxyType({"center": "xMidYMid", "top": "xMidYMin", "bottom": "xMidYMax",
+                                  "left": "xMinYMid", "right": "xMaxYMid"})
+_MIN_DIGIT_CONTRAST, _MIN_LINE_CONTRAST = 4.5, 3.0
+
+
+def _media_type(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
+    if head.startswith((b"<svg", b"<?xml", b"<!--")) and b"<svg" in data:
+        return "image/svg+xml"
+    return None
+
+
+@dataclass(frozen=True)
+class Picture:
+    """An image drawn behind the board. Construct with bytes or :meth:`from_file`.
+
+    ``data`` must be a PNG, JPEG or SVG file (recognised by its content, not a name) of at most
+    ``MAX_PICTURE_BYTES``; ``focus`` (a key of ``PICTURE_FOCUS``) chooses the part kept when a
+    non-square picture is cropped. The media type is derived, never supplied.
+    """
+
+    data: bytes
+    focus: str = "center"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, bytes):
+            raise InvalidArgumentError(f"picture data must be bytes, got {type(self.data).__name__}")
+        if not 0 < len(self.data) <= MAX_PICTURE_BYTES:
+            raise InvalidArgumentError(f"picture must be 1 to {MAX_PICTURE_BYTES} bytes, got {len(self.data)}")
+        if _media_type(self.data) is None:
+            raise InvalidArgumentError("picture must be a PNG, JPEG or SVG file")
+        if self.focus not in PICTURE_FOCUS:
+            raise InvalidArgumentError(f"picture focus must be one of {', '.join(PICTURE_FOCUS)}, got {self.focus!r}")
+
+    @classmethod
+    def from_file(cls, path: str | os.PathLike[str], focus: str = "center") -> "Picture":
+        """Read a picture file. ``OSError`` propagates; an unusable file raises ``InvalidArgumentError``."""
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_PICTURE_BYTES + 1)
+        return cls(data, focus)
+
+    @property
+    def media_type(self) -> str:
+        return _media_type(self.data)  # type: ignore[return-value]  # validated in __post_init__
+
+    def __repr__(self) -> str:  # never dump megabytes of image data
+        return f"Picture({self.media_type}, {len(self.data)} bytes, focus={self.focus!r})"
+
+
+def _luminance(hex_color: str) -> float:
+    return _relative_luminance([int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)])
+
+
+def _relative_luminance(rgb: Sequence[float]) -> float:
+    lin = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def worst_case_contrast(color: str, background: str, veil: float) -> float:
+    """Lowest WCAG contrast of ``color`` over ``background`` at opacity ``veil`` above any picture.
+
+    The composite is affine in the pixel and luminance is monotone in each channel, so the luminance
+    under the colour ranges exactly over [black pixel, white pixel] (grey pixels fill the interval).
+    A colour whose luminance falls inside that interval matches some pixel: contrast 1. Otherwise the
+    nearer end of the interval is the worst case.
+    """
+    bg = [int(background[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    fg = _luminance(color)
+    darkest, lightest = (_relative_luminance([veil * c + (1 - veil) * pixel for c in bg]) for pixel in (0.0, 1.0))
+    if fg > lightest:
+        return (fg + 0.05) / (lightest + 0.05)
+    if fg < darkest:
+        return (darkest + 0.05) / (fg + 0.05)
+    return 1.0
+
 
 @dataclass(frozen=True)
 class Theme:
@@ -65,6 +161,11 @@ class Theme:
 
     ``digit`` colours digits when no given information is supplied, ``given`` and ``filled``
     colour clues and other digits (which differ in weight and slant as well, never colour alone).
+
+    ``picture`` (a :class:`Picture`, default ``None``) is drawn behind the board under a veil of
+    ``background`` at opacity ``veil`` (0..1, default ``DEFAULT_VEIL``). With a picture the theme
+    must pass :func:`worst_case_contrast` (digits 4.5:1, lines 3:1) or construction fails; that is
+    what keeps a picture theme readable whatever the picture shows.
     """
 
     name: str
@@ -75,6 +176,8 @@ class Theme:
     digit: str
     given: str
     filled: str
+    picture: Picture | None = None
+    veil: float = DEFAULT_VEIL
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _THEME_NAME.fullmatch(self.name):
@@ -84,6 +187,20 @@ class Theme:
             if not isinstance(value, str) or not _HEX_COLOR.fullmatch(value):
                 raise InvalidArgumentError(f"theme {field} must be a '#rrggbb' colour, got {value!r}")
             object.__setattr__(self, field, value.lower())
+        if self.picture is not None and not isinstance(self.picture, Picture):
+            raise InvalidArgumentError(f"theme picture must be a Picture or None, got {type(self.picture).__name__}")
+        if isinstance(self.veil, bool) or not isinstance(self.veil, (int, float)) or not 0 <= self.veil <= 1:
+            raise InvalidArgumentError(f"theme veil must be a number from 0 to 1, got {self.veil!r}")
+        object.__setattr__(self, "veil", round(float(self.veil), 4))  # checked exactly as it is written out
+        if self.picture is not None:
+            for field, needed in (("digit", _MIN_DIGIT_CONTRAST), ("given", _MIN_DIGIT_CONTRAST),
+                                  ("filled", _MIN_DIGIT_CONTRAST), ("grid", _MIN_LINE_CONTRAST),
+                                  ("box", _MIN_LINE_CONTRAST), ("border", _MIN_LINE_CONTRAST)):
+                ratio = worst_case_contrast(getattr(self, field), self.background, self.veil)
+                if ratio < needed:
+                    raise InvalidArgumentError(
+                        f"theme {self.name!r}: {field} {getattr(self, field)} reaches only {ratio:.2f}:1 over the "
+                        f"picture (needs {needed}:1); use a stronger veil or a colour further from the background")
 
 
 LIGHT_THEME = Theme("light", background="#ffffff", grid="#808080", box="#000000", border="#000000",
@@ -206,8 +323,17 @@ def render_board_svg(
         f'<svg xmlns="{SVG_NAMESPACE}" width="{total}" height="{total}" viewBox="0 0 {total} {total}" '
         f'role="img" aria-label="Sudoku board">',
         f'  <rect class="background" x="0" y="0" width="{total}" height="{total}" fill="{theme.background}"/>',
-        f'  <g class="thin-lines" stroke="{theme.grid}" stroke-width="{_THIN}">',
     ]
+    if theme.picture is not None:
+        picture = theme.picture
+        data = base64.b64encode(picture.data).decode("ascii")
+        out.append(f'  <image class="picture" x="0" y="0" width="{total}" height="{total}" '
+                   f'preserveAspectRatio="{PICTURE_FOCUS[picture.focus]} slice" '
+                   f'href="data:{picture.media_type};base64,{data}"/>')
+        opacity = f"{theme.veil:.4f}".rstrip("0").rstrip(".")  # the exact value the contrast check used
+        out.append(f'  <rect class="veil" x="0" y="0" width="{total}" height="{total}" fill="{theme.background}" '
+                   f'fill-opacity="{opacity}"/>')
+    out.append(f'  <g class="thin-lines" stroke="{theme.grid}" stroke-width="{_THIN}">')
     for i in range(1, _SIZE):
         if i % 3:
             p = margin + i * cell_size

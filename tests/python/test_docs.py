@@ -1,4 +1,6 @@
-"""README accuracy checks (M24): executable examples, internal links, and agreement with the real engine and API."""
+"""Documentation accuracy checks (M24): README.md and docs/REFERENCE.md - executable examples, links, and agreement
+with the real engine and API. Content checks look at both files together (the README is the short guide, the
+reference holds the details); anchors and relative links are checked per file."""
 from __future__ import annotations
 
 import json
@@ -12,17 +14,20 @@ import sudoku_app
 from sudoku_app import SudokuEngine, load_settings
 
 ROOT = Path(__file__).resolve().parents[2]
-README = (ROOT / "README.md").read_text(encoding="utf-8")
+DOC_FILES = (ROOT / "README.md", ROOT / "docs" / "REFERENCE.md")
+README = DOC_FILES[0].read_text(encoding="utf-8")
+REFERENCE = DOC_FILES[1].read_text(encoding="utf-8")
+DOCS = README + "\n" + REFERENCE
 
 
-def blocks(info: str) -> list[str]:
-    return re.findall(rf"```{re.escape(info)}\n(.*?)\n```", README, re.S)
+def blocks(info: str, text: str = DOCS) -> list[str]:
+    return re.findall(rf"```{re.escape(info)}\n(.*?)\n```", text, re.S)
 
 
-def prose_and_headings():
+def prose_and_headings(text: str):
     """(headings, text outside code fences)."""
     headings, outside, fenced = [], [], False
-    for line in README.splitlines():
+    for line in text.splitlines():
         if line.startswith("```"):
             fenced = not fenced
             continue
@@ -80,19 +85,30 @@ def test_python_run_blocks_exist_and_compile():
 
 # ---- links, structure, wording -------------------------------------------------------------------------------------------
 
-def test_internal_anchor_links_resolve():
-    headings, text = prose_and_headings()
+@pytest.mark.parametrize("path", DOC_FILES, ids=lambda p: p.name)
+def test_internal_anchor_links_resolve(path):
+    headings, text = prose_and_headings(path.read_text(encoding="utf-8"))
     slugs = {slug(h) for h in headings}
     links = re.findall(r"\]\(#([^)]+)\)", text)
-    assert links
     missing = sorted(set(links) - slugs)
     assert not missing, f"anchors without a heading: {missing}"
+    assert re.findall(r"\]\(#([^)]+)\)", REFERENCE)                # the reference's table of contents
 
 
-def test_relative_file_links_exist():
-    _, text = prose_and_headings()
+@pytest.mark.parametrize("path", DOC_FILES, ids=lambda p: p.name)
+def test_relative_file_links_exist(path):
+    _, text = prose_and_headings(path.read_text(encoding="utf-8"))
     for target in re.findall(r"\]\((?!https?:|#|mailto:)([^)\s]+)\)", text):
-        assert (ROOT / target.split("#")[0]).exists(), target
+        file, _, anchor = target.partition("#")
+        linked = path.parent / file
+        assert linked.exists(), target
+        if anchor and linked.suffix == ".md":                       # cross-file anchors must exist too
+            headings, _ = prose_and_headings(linked.read_text(encoding="utf-8"))
+            assert anchor in {slug(h) for h in headings}, target
+
+
+def test_readme_links_to_the_reference():
+    assert "](docs/REFERENCE.md)" in README
 
 
 def test_repository_layout_block_matches_the_tree():
@@ -108,13 +124,13 @@ def test_repository_layout_block_matches_the_tree():
 def test_no_placeholders_or_obsolete_status_wording():
     for phrase in ("TODO", "TBD", "FIXME", "XXX", "lorem", "coming soon", "Initial project setup", "will be documented",
                    "a later milestone", "planned for a later", "to be chosen", "not implemented yet", "is not available yet"):
-        assert phrase.lower() not in README.lower(), phrase
+        assert phrase.lower() not in DOCS.lower(), phrase
 
 
 def test_documented_python_version_matches_the_project():
     pyproject = (ROOT / "pyproject.toml").read_text()
     assert 'requires-python = ">=3.11"' in pyproject
-    assert "Python | >= 3.11" in README or "Python >= 3.11" in README
+    assert "Python | >= 3.11" in DOCS and "Python >= 3.11" in README
 
 
 # ---- agreement with the implementation -------------------------------------------------------------------------------------
@@ -123,26 +139,26 @@ def test_every_public_python_name_is_documented():
     for name in sudoku_app.__all__:
         if name.startswith("_") or name in ("errors", "models", "__version__"):
             continue
-        assert name in README, f"{name} is exported but not documented in the README"
+        assert name in DOCS, f"{name} is exported but not documented in README.md or docs/REFERENCE.md"
 
 
 def test_documented_operations_techniques_and_profiles_match_the_engine(engine_executable):
     caps = SudokuEngine(engine_executable, timeout=60).capabilities()
-    table = README.split("### Operations", 1)[1].split("Technique ids:", 1)[0]
+    table = DOCS.split("### Operations", 1)[1].split("Technique ids:", 1)[0]
     documented_ops = set(re.findall(r"^\| `(\w+)` \|", table, re.M)) - {"op"}      # the header row
     assert documented_ops == set(caps.operations)
-    technique_line = re.search(r"Technique ids: (.*?)\. Engine semantics", README, re.S).group(1)
+    technique_line = re.search(r"Technique ids: (.*?)\. Engine semantics", DOCS, re.S).group(1)
     assert re.findall(r"`(\w+)`", technique_line) == list(caps.techniques)
     assert [p.name for p in caps.profiles] == ["Easy", "Medium", "Hard", "Expert", "Master"]
     for name in ("Easy", "Medium", "Hard", "Expert", "Master"):
-        assert name in README
+        assert name in DOCS
     assert caps.board_length == 81
 
 
 def test_documented_exit_codes_and_error_codes_match_the_client():
     from sudoku_app import protocol
     assert (protocol.EXIT_SUCCESS, protocol.EXIT_NON_SUCCESS, protocol.EXIT_PROTOCOL_ERROR, protocol.EXIT_INTERNAL_ERROR) == (0, 1, 2, 3)
-    section = README.split("### Exit codes", 1)[1].split("###", 1)[0]
+    section = DOCS.split("### Exit codes", 1)[1].split("###", 1)[0]
     for code in "0123":
         assert re.search(rf"^\| {code} \|", section, re.M)
 
@@ -150,11 +166,11 @@ def test_documented_exit_codes_and_error_codes_match_the_client():
 def test_documented_batch_and_settings_fields_exist():
     from dataclasses import fields
     from sudoku_app import Settings
-    section = README.split("### Settings", 1)[1]
+    section = DOCS.split("### Settings", 1)[1]
     for f in fields(Settings):
         assert f"`{f.name}`" in section, f.name
     for name in ("success", "unsuccessful", "failed", "skipped"):
-        assert f"`{name}`" in README
+        assert f"`{name}`" in DOCS
 
 
 def test_run_the_application_examples_work_through_run_sh(engine_executable, tmp_path):
@@ -162,9 +178,9 @@ def test_run_the_application_examples_work_through_run_sh(engine_executable, tmp
     import os
     if Path(engine_executable).resolve() != (ROOT / "build" / "dev" / "sudoku_cli").resolve():
         pytest.skip("run.sh uses build/dev/sudoku_cli")
-    found = blocks("sh runapp")
+    found = blocks("sh runapp", README)
     assert found
-    env = {**os.environ, "SUDOKU_NO_BUILD": "1"}
+    env = {**os.environ, "SUDOKU_NO_BUILD": "1", "SUDOKU_OUTPUT_DIR": str(tmp_path)}   # stands in for product/
     for script in found:
         done = subprocess.run(["bash", "-e", "-c", script.replace("./run.sh", str(ROOT / "run.sh"))], cwd=tmp_path, env=env,
                               capture_output=True, text=True, timeout=300)
@@ -178,7 +194,7 @@ def test_documented_launcher_commands_are_known_cli_options():
     parser = cli.build_parser()
     subparsers = next(a for a in parser._actions if getattr(a, "choices", None) and isinstance(a.choices, dict))
     help_text = parser.format_help() + "".join(sub.format_help() for sub in subparsers.choices.values())
-    section = README.split("## Run the application", 1)[1].split("## Contents", 1)[0]
+    section = README.split("## Run the application", 1)[1].split("\n## ", 1)[0]
     used = [line for line in section.splitlines() if "./run.sh" in line]
     assert used
     for line in used:

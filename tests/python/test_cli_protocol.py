@@ -382,9 +382,9 @@ def test_benchmark_tool_is_unaffected():
 # ----------------------------------------------------------- documentation
 
 def readme_examples():
-    """(request text, expected exit code, expected response text) from the README."""
+    """(request text, expected exit code, expected response text) from the README and docs/REFERENCE.md."""
     import re
-    text = (ROOT / "README.md").read_text()
+    text = (ROOT / "README.md").read_text() + "\n" + (ROOT / "docs" / "REFERENCE.md").read_text()
     pattern = re.compile(r"```json request\n(.*?)\n```\s*```json response exit=(\d+)\n(.*?)\n```", re.S)
     return [(req, int(code), resp) for req, code, resp in pattern.findall(text)]
 

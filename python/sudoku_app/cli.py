@@ -17,6 +17,7 @@ Expected application errors are reported as one ``error:`` line on standard erro
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -29,10 +30,13 @@ from .export import export_solution_svg
 from .models import LogicalStatus, SearchStatus, SolutionClass, VerifyStatus
 from .protocol import MAX_ATTEMPTS, MAX_CLUES, MAX_SEED, MIN_CLUES, check_board
 from .svg import THEME_NAMES, render_board_svg
+from .themes import load_theme_pack, resolve_theme
 
 EXIT_OK, EXIT_NEGATIVE, EXIT_USAGE, EXIT_ENGINE, EXIT_OUTPUT = 0, 1, 2, 3, 4
 PROFILES = ("Easy", "Medium", "Hard", "Expert", "Master")
 DEFAULT_TIMEOUT = 300.0
+THEME_PACK_ENV = "SUDOKU_THEME_PACK"
+OUTPUT_DIR_ENV = "SUDOKU_OUTPUT_DIR"
 
 EXAMPLES = """\
 examples:
@@ -43,6 +47,7 @@ examples:
   ./run.sh solve --method logical --board "..."       deductions only (may stall)
   ./run.sh verify --puzzle "..." --solution "..."
   ./run.sh classify --board "..."
+  ./run.sh themes                                     list the SVG themes, then: generate --theme NAME --output x.svg
 
 boards are 81 characters, row by row: digits 1-9 and . (or 0) for an empty cell.
 exit codes: 0 success, 1 negative answer (exhausted, no solution, stall, invalid solution),
@@ -118,6 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", metavar="PATH", help="engine executable (default: $SUDOKU_CLI, then build/dev/sudoku_cli)")
     parser.add_argument("--timeout", type=_timeout, default=DEFAULT_TIMEOUT, metavar="SECONDS",
                         help=f"time limit for each engine call (default {DEFAULT_TIMEOUT:g})")
+    parser.add_argument("--theme-pack", metavar="FILE",
+                        help=f"themes.json with picture themes (default: ${THEME_PACK_ENV}; ./run.sh sets it to "
+                             "themePictures/themes.json when that file exists)")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
 
     gen = sub.add_parser("generate", help="generate a puzzle", formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -132,9 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"clue count to aim for ({MIN_CLUES}-{MAX_CLUES}); a goal, not a promise")
     gen.add_argument("--max-attempts", type=_int_in(1, MAX_ATTEMPTS, "max-attempts"), metavar="N",
                      help="attempt limit with --difficulty (engine default 100; Expert and Master usually need many more)")
-    gen.add_argument("--output", metavar="FILE", help="write the puzzle as an SVG image (relative paths: current directory)")
+    gen.add_argument("--output", metavar="FILE",
+                     help=f"write the puzzle as an SVG image; a bare file name goes to ${OUTPUT_DIR_ENV} (./run.sh: product/), "
+                          "a path with a directory is used as given")
     gen.add_argument("--solution-output", metavar="FILE", help="write the engine-verified solution as an SVG image")
-    gen.add_argument("--theme", choices=THEME_NAMES, default="default", help="SVG theme (default: default)")
+    gen.add_argument("--theme", default="default", metavar="NAME",
+                     help=f"SVG theme: {', '.join(THEME_NAMES)} or a picture theme from the theme pack "
+                          "(list them with: ./run.sh themes; default: default)")
     gen.add_argument("--overwrite", action="store_true", help="replace existing output files (default: refuse)")
     gen.add_argument("--show-solution", action="store_true", help="also print the solution (hidden by default)")
 
@@ -153,6 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
     cls = sub.add_parser("classify", help="difficulty of a board by logical techniques", formatter_class=argparse.RawDescriptionHelpFormatter,
                          epilog='example:\n  ./run.sh classify --board "53..7..."\n')
     cls.add_argument("--board", type=_board, required=True, help="81 characters")
+
+    themes = sub.add_parser("themes", help="list the SVG themes", formatter_class=argparse.RawDescriptionHelpFormatter,
+                            description="List the built-in themes and the picture themes of the theme pack.",
+                            epilog="example:\n  for t in $(./run.sh themes --names); do ...; done\n")
+    themes.add_argument("--names", action="store_true", help="print only the names, one per line")
     return parser
 
 
@@ -166,10 +183,23 @@ def _claim_uniqueness(engine: SudokuEngine, puzzle: str) -> str | int:
     return fail(f"the engine returned a puzzle that is not provably unique (count {count.count}, exact={count.exact})", EXIT_ENGINE)
 
 
+def _output_target(path: str) -> Path:
+    """A bare file name goes to $SUDOKU_OUTPUT_DIR (created if missing) when that is set; any other path is used as given."""
+    directory = os.environ.get(OUTPUT_DIR_ENV)
+    bare = os.sep not in path and not (os.altsep and os.altsep in path)
+    if not directory or not bare:
+        return Path(path)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as exc:
+        raise errors.InvalidArgumentError(f"cannot create the output directory {directory!r}: {exc.strerror or exc}") from None
+    return Path(directory) / path
+
+
 def _check_output_path(path: str | None, overwrite: bool) -> Path | None:
     if path is None:
         return None
-    target = Path(path)
+    target = _output_target(path)
     if not target.parent.is_dir():
         raise errors.InvalidArgumentError(f"the directory for output file {path!r} does not exist")
     if target.is_dir():
@@ -177,6 +207,23 @@ def _check_output_path(path: str | None, overwrite: bool) -> Path | None:
     if target.exists() and not overwrite:
         raise errors.InvalidArgumentError(f"output file {path!r} already exists (use --overwrite to replace it)")
     return target
+
+
+def cmd_themes(args: argparse.Namespace) -> int:
+    pack = args.pack or {}
+    if args.names:
+        print("\n".join([*THEME_NAMES, *pack]))
+        return EXIT_OK
+    print("built-in themes: " + ", ".join(THEME_NAMES))
+    if args.pack_file is None:
+        print(f"picture themes: none (no theme pack; use --theme-pack FILE or ${THEME_PACK_ENV})")
+        return EXIT_OK
+    print(f"picture themes ({args.pack_file}):")
+    for name, theme in pack.items():
+        picture = theme.picture
+        print(f"  {name:24} {picture.media_type:14} {len(picture.data) / 1024:8.0f} KiB   veil {theme.veil:g}")
+    print("use: ./run.sh generate --theme NAME --output puzzle.svg")
+    return EXIT_OK
 
 
 def cmd_generate(engine: SudokuEngine, args: argparse.Namespace) -> int:
@@ -320,6 +367,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return EXIT_OK
     args = parser.parse_args(args_list)          # usage errors exit with status 2 and a one-line message
+    args.pack_file = args.theme_pack or os.environ.get(THEME_PACK_ENV) or None
+    args.pack = None
+    needs_pack = args.command == "themes" or (args.command == "generate" and args.theme not in THEME_NAMES)
+    try:
+        if needs_pack and args.pack_file is not None:
+            args.pack = load_theme_pack(args.pack_file)
+        if args.command == "generate":
+            args.theme = resolve_theme(args.theme, args.pack)
+    except errors.InvalidArgumentError as exc:   # includes ConfigurationError: a broken pack is a usage problem
+        parser.error(str(exc))
+    if args.command == "themes":
+        return cmd_themes(args)
     try:
         engine = SudokuEngine(args.engine, timeout=args.timeout)
         return COMMANDS[args.command](engine, args)

@@ -41,3 +41,6 @@ benchmarks/results/
 !examples/**/*.png
 !docs/**/*.svg
 !docs/**/*.png
+
+# Local picture themes: your own pictures (often third-party, not MIT-licensed) and their themes.json
+/themePictures/
